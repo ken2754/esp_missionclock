@@ -59,34 +59,34 @@ static int64_t s_typing_next_ms = 0;
 static bool s_cursor_blink_on = true;
 static int64_t s_cursor_next_blink_ms = 0;
 
-// Compact timestamp format: NO brackets, NO colons!
+// Timestamp format with authentic colons: 9-char unified width in all modes!
 static void format_time_compact(char *buf, size_t buf_len, const terminal_log_entry_t *e, uint8_t time_mode)
 {
     if (time_mode == TIME_MODE_LOCAL_OFFSET || e->is_joke) {
-        // e.g. "153014" (6 chars)
+        // e.g. " 15:30:14" (9 chars, aligned with GET mode)
         time_t t = (time_t)e->local_sec;
         struct tm tm_info;
         localtime_r(&t, &tm_info);
-        snprintf(buf, buf_len, "%02d%02d%02d", tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
+        snprintf(buf, buf_len, " %02d:%02d:%02d", tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
     } else {
         int32_t s = e->get_sec;
         if (s < 0) {
-            // Pre-launch e.g. "-011540" (7 chars)
+            // Pre-launch e.g. "-02:26:14" (9 chars)
             int32_t abs_s = -s;
             int h = abs_s / 3600;
             int m = (abs_s % 3600) / 60;
             int sec = abs_s % 60;
-            snprintf(buf, buf_len, "-%02d%02d%02d", h, m, sec);
+            snprintf(buf, buf_len, "-%02d:%02d:%02d", h, m, sec);
         } else {
-            // Post-launch e.g. "+000123" (7 chars) or "+1D0234" (7 chars)
+            // Post-launch e.g. "+00:01:23" (9 chars) or "+01D02:34" (9 chars)
             int d = s / 86400;
             int h = (s % 86400) / 3600;
             int m = (s % 3600) / 60;
             int sec = s % 60;
             if (d > 0) {
-                snprintf(buf, buf_len, "+%dD%02d%02d", d, h, m);
+                snprintf(buf, buf_len, "+%02dD%02d:%02d", d, h, m);
             } else {
-                snprintf(buf, buf_len, "+%02d%02d%02d", h, m, sec);
+                snprintf(buf, buf_len, "+%02d:%02d:%02d", h, m, sec);
             }
         }
     }
@@ -253,9 +253,10 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
         enqueue_chunk(get_sec, local_sec, speaker_id, text, is_joke, false);
     } else {
         // Line width capacity:
-        // Main line: 11-12 chars prefix ("153014 CDR " or "-011540 PAO ") -> 26 chars available for text
-        // Continuation line: 2-space indent ("  ") -> 37 - 2 = 35 chars available for text!
-        const int first_max = 26;
+        // Main line: 9 chars timestamp + 1 space + 3 chars speaker + 1 space = 14 chars prefix
+        // 40 - 14 = 26 chars available. 24 text + 1 cursor = 25 <= 26!
+        // Continuation line: 2-space indent ("  ") -> 40 - 2 = 38 chars available! 35 text + 1 cursor = 36 <= 38!
+        const int first_max = 24;
         const int cont_max  = 35;
 
         const char *p = text;
@@ -291,13 +292,13 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
     }
 }
 
-// Step typing animation with human cadence, block cursor, and blinking
+// Step typing animation with human cadence, block cursor, and 1s clock-sync blinking
 static void update_typing_animation(int64_t now_ms)
 {
-    // Update block cursor blink (350ms period)
+    // Update block cursor blink (1000ms / 1s period: 1s ON, 1s OFF)
     if (now_ms >= s_cursor_next_blink_ms) {
         s_cursor_blink_on = !s_cursor_blink_on;
-        s_cursor_next_blink_ms = now_ms + 350;
+        s_cursor_next_blink_ms = now_ms + 1000;
         if (s_is_typing && s_typing_row >= 0) {
             render_row_internal(s_typing_row, true);
         } else if (s_entry_count > 0) {
@@ -322,6 +323,8 @@ static void update_typing_animation(int64_t now_ms)
 
             s_typing_pos = 0;
             s_is_typing = true;
+            s_cursor_blink_on = true;
+            s_cursor_next_blink_ms = now_ms + 1000;
             s_typing_next_ms = now_ms + 30;
 
             // Re-render preceding static rows (clears previous cursors)
@@ -342,7 +345,9 @@ static void update_typing_animation(int64_t now_ms)
                 s_entries[s_typing_row].text[s_typing_pos - 1] = next_ch;
                 s_entries[s_typing_row].text[s_typing_pos] = '\0';
 
-                // Render with moving block cursor
+                // Keep cursor on while active typing
+                s_cursor_blink_on = true;
+                s_cursor_next_blink_ms = now_ms + 1000;
                 render_row_internal(s_typing_row, true);
 
                 // Queue catch-up speed boost: if queue has lines pending, speed up typing!
@@ -362,9 +367,11 @@ static void update_typing_animation(int64_t now_ms)
                 }
                 s_typing_next_ms = now_ms + delay_ms;
             } else {
-                // Done typing this line: keep cursor blinking at end of line
+                // Done typing this line: keep cursor blinking at end of line (start with ON for 1s)
                 render_row_internal(s_typing_row, true);
                 s_is_typing = false;
+                s_cursor_blink_on = true;
+                s_cursor_next_blink_ms = now_ms + 1000;
                 s_typing_next_ms = now_ms + 40; // Brief pause before next line
             }
         }
