@@ -85,9 +85,8 @@ static const char HTML_PAGE[] =
 "<label>Display Brightness</label>"
 "<select name='bright'>"
 "<option value='100' %s>100%% (Full)</option>"
-"<option value='50' %s>50%% (Medium)</option>"
-"<option value='25' %s>25%% (Dim)</option>"
-"<option value='0' %s>Off</option>"
+"<option value='20' %s>20%% (Dim)</option>"
+"<option value='0' %s>Off (0%%)</option>"
 "</select>"
 "<button type='submit'>SAVE &amp; APPLY SETTINGS</button>"
 "</form></div></body></html>";
@@ -113,9 +112,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
              s->hourly_joke_enabled ? "selected" : "",
              !s->hourly_joke_enabled ? "selected" : "",
              s->timezone,
-             (s->brightness == 100) ? "selected" : "",
-             (s->brightness == 50) ? "selected" : "",
-             (s->brightness == 25) ? "selected" : "",
+             (s->brightness >= 100) ? "selected" : "",
+             (s->brightness > 0 && s->brightness < 100) ? "selected" : "",
              (s->brightness == 0) ? "selected" : ""
     );
 

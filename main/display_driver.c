@@ -95,10 +95,8 @@ uint8_t display_driver_cycle_brightness(void)
 {
     uint8_t next;
     if (s_current_brightness == 0) {
-        next = 25;
-    } else if (s_current_brightness <= 25) {
-        next = 50;
-    } else if (s_current_brightness <= 50) {
+        next = 20;
+    } else if (s_current_brightness <= 20) {
         next = 100;
     } else {
         next = 0;

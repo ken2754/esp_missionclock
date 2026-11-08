@@ -101,10 +101,16 @@ void mission_engine_set_mission(mission_id_t id)
 
 void mission_engine_handle_touch(int screen_x, int screen_y)
 {
-    // Tap anywhere to toggle time mode (Local Offset vs Historical GET)
-    ESP_LOGI(TAG, "Screen tap at (%d, %d): Toggling time display mode.", screen_x, screen_y);
-    settings_mgr_toggle_time_mode();
-    terminal_ui_refresh_all_lines();
+    if (screen_y < 120) {
+        // Upper half tap: Cycle brightness (0% -> 20% -> 100% -> 0%)
+        uint8_t b = display_driver_cycle_brightness();
+        ESP_LOGI(TAG, "Upper half tap at (%d, %d): Brightness cycled to %d%%", screen_x, screen_y, b);
+    } else {
+        // Lower half tap: Toggle time display mode (Local Offset vs Historical GET)
+        ESP_LOGI(TAG, "Lower half tap at (%d, %d): Toggling time display mode.", screen_x, screen_y);
+        settings_mgr_toggle_time_mode();
+        terminal_ui_refresh_all_lines();
+    }
 }
 
 static void trigger_hourly_joke_step(time_t now, int hour)
