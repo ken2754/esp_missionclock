@@ -22,6 +22,10 @@ static int64_t s_base_local_sec = 0; // Local time corresponding to GET = 0
 static bool s_engine_running = false;
 static bool s_sntp_synced_once = false;
 
+// 1-Hour Intermission state between completed missions
+static bool s_mission_intermission = false;
+static int64_t s_intermission_end_sec = 0;
+
 // Hourly Joke state
 static int s_last_joke_hour = -1;
 static bool s_joke_in_progress = false;
@@ -42,6 +46,7 @@ static void reset_timeline(mission_id_t mission_id)
 {
     s_curr_mission = mission_id;
     s_curr_event_idx = 0;
+    s_mission_intermission = false;
 
     time_t now = sntp_time_get_epoch();
     if (now < 1700000000) {
@@ -237,14 +242,20 @@ static void mission_engine_task(void *pvParameters)
         strftime(clock_buf, sizeof(clock_buf), "%H:%M:%S", &tm_info);
 
         const mission_info_t *info = mission_data_get_info(s_curr_mission);
-        const char *mode_str = (g_settings.time_mode == TIME_MODE_LOCAL_OFFSET) ? "LOC" : "GET";
+        char mode_str[16];
+        if (s_mission_intermission) {
+            snprintf(mode_str, sizeof(mode_str), "%s", "WAIT");
+        } else {
+            snprintf(mode_str, sizeof(mode_str), "%s", (g_settings.time_mode == TIME_MODE_LOCAL_OFFSET) ? "LOC" : "GET");
+        }
         const char *ip_str = wifi_portal_is_connected() ? wifi_portal_get_ip() :
                              (wifi_portal_is_ap_active() ? "192.168.4.1" : "--.--.--.--");
 
         terminal_ui_update_status(clock_buf, info->id_str, mode_str, ip_str);
 
         // 1. Check Hourly Joke Trigger (:00:00 to :00:55)
-        if (g_settings.hourly_joke_enabled && tm_info.tm_min == 0 && tm_info.tm_sec < 55) {
+        // Strictly suppressed during post-mission 1-hour wait ("その間はジョークもなしです。")
+        if (!s_mission_intermission && g_settings.hourly_joke_enabled && tm_info.tm_min == 0 && tm_info.tm_sec < 55) {
             if (s_last_joke_hour != tm_info.tm_hour && !s_joke_in_progress) {
                 // Check if any historical event is scheduled within the next 60 seconds
                 bool event_in_window = false;
@@ -269,46 +280,70 @@ static void mission_engine_task(void *pvParameters)
                 trigger_hourly_joke_step(now, tm_info.tm_hour);
             }
         } else {
-            if (tm_info.tm_min > 0) {
-                s_joke_in_progress = false; // Reset if minute passed
+            if (tm_info.tm_min > 0 || s_mission_intermission) {
+                s_joke_in_progress = false; // Reset if minute passed or intermission
             }
         }
 
-        // 2. Advance Historical Transcript Timeline with Strict Real-Time Cadence
-        uint32_t total_events = mission_data_get_count(s_curr_mission);
-        while (s_curr_event_idx < total_events) {
-            mission_event_t ev;
-            if (!mission_data_get_event(s_curr_mission, s_curr_event_idx, &ev)) {
-                break;
+        // 2. Advance Historical Transcript Timeline or Hold 1-Hour Post-Mission Wait
+        if (s_mission_intermission) {
+            if (now >= s_intermission_end_sec) {
+                // 1-hour wait elapsed: start next mission in the sequence!
+                mission_id_t next_mission = (s_curr_mission + 1) % MISSION_COUNT;
+                ESP_LOGI(TAG, "1-hour intermission completed. Transitioning to next mission %d", next_mission);
+                settings_mgr_set_mission(next_mission);
+                reset_timeline(next_mission);
             }
-            int64_t ev_local_sec = s_base_local_sec + ev.get_sec;
+        } else {
+            uint32_t total_events = mission_data_get_count(s_curr_mission);
+            while (s_curr_event_idx < total_events) {
+                mission_event_t ev;
+                if (!mission_data_get_event(s_curr_mission, s_curr_event_idx, &ev)) {
+                    break;
+                }
+                int64_t ev_local_sec = s_base_local_sec + ev.get_sec;
 
-            if (now < ev_local_sec) {
-                // Historical silence: strictly wait until the authentic historical second arrives!
-                // Terminal sits silently with the solid block cursor blinking.
-                break;
+                if (now < ev_local_sec) {
+                    // Historical silence: strictly wait until the authentic historical second arrives!
+                    // Terminal sits silently with the solid block cursor blinking.
+                    break;
+                }
+
+                // Current time caught up or passed scheduled time (now >= ev_local_sec)
+                // Limit feeding if typing queue is busy so we don't drop lines
+                if (terminal_ui_get_queue_count() > 3) {
+                    break;
+                }
+
+                // Feed next due utterance to terminal UI
+                char clean_text[256];
+                int copy_len = ev.text_len < sizeof(clean_text) - 1 ? ev.text_len : sizeof(clean_text) - 1;
+                memcpy(clean_text, ev.text, copy_len);
+                clean_text[copy_len] = '\0';
+
+                terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false);
+                s_curr_event_idx++;
             }
 
-            // Current time caught up or passed scheduled time (now >= ev_local_sec)
-            // Limit feeding if typing queue is busy so we don't drop lines
-            if (terminal_ui_get_queue_count() > 3) {
-                break;
+            if (s_curr_event_idx >= total_events && !terminal_ui_is_typing()) {
+                // All mission events completed and displayed!
+                const mission_info_t *comp_info = mission_data_get_info(s_curr_mission);
+                mission_id_t next_m = (s_curr_mission + 1) % MISSION_COUNT;
+                const mission_info_t *next_info = mission_data_get_info(next_m);
+
+                char comp_banner[128];
+                snprintf(comp_banner, sizeof(comp_banner), "--- MISSION COMPLETE: %s ---", comp_info->full_name);
+                terminal_ui_add_log(0, now, SPK_OTHER, comp_banner, false);
+
+                char next_banner[128];
+                snprintf(next_banner, sizeof(next_banner), "--- 1-HR RECOVERY: NEXT %s ---", next_info->full_name);
+                terminal_ui_add_log(0, now + 1, SPK_OTHER, next_banner, false);
+
+                s_mission_intermission = true;
+                s_intermission_end_sec = now + 3600; // 1-hour wait
+                ESP_LOGI(TAG, "Mission %s complete. 1-hour intermission until %lld (Next: %s)",
+                         comp_info->full_name, (long long)s_intermission_end_sec, next_info->full_name);
             }
-
-            // Feed next due utterance to terminal UI
-            char clean_text[256];
-            int copy_len = ev.text_len < sizeof(clean_text) - 1 ? ev.text_len : sizeof(clean_text) - 1;
-            memcpy(clean_text, ev.text, copy_len);
-            clean_text[copy_len] = '\0';
-
-            terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false);
-            s_curr_event_idx++;
-        }
-
-        if (s_curr_event_idx >= total_events) {
-            // Mission completed, loop back after a short pause
-            vTaskDelay(pdMS_TO_TICKS(15000));
-            reset_timeline(s_curr_mission);
         }
 
         vTaskDelay(pdMS_TO_TICKS(100)); // Poll every 100ms
