@@ -2,6 +2,8 @@
 """
 tools/fetch_and_pack_missions.py
 Download and pack curated NASA Apollo 8, 11, 13, and 17 transcripts into compact binary formats.
+Properly splits long utterances on sentence/word boundaries so no words are cut in half,
+and spaces out multi-sentence announcements by a few seconds to prevent queue flooding.
 """
 
 import os
@@ -40,13 +42,9 @@ SPEAKER_MAP = {
 def clean_ascii(text):
     text = text.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
     text = text.replace("—", "--").replace("–", "-").replace("…", "...")
-    # Remove glossary tags like [glossary:P11] -> P11
     text = re.sub(r'\[glossary:([^\]]+)\]', r'\1', text)
-    # Remove footnotes or markdown links [text](url) -> text
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    # Normalize whitespaces
     text = re.sub(r'\s+', ' ', text).strip()
-    # Filter to printable ASCII
     return "".join(c for c in text if 32 <= ord(c) <= 126)
 
 def parse_spacelog_time(ts_str):
@@ -133,100 +131,141 @@ def parse_apollo17_csv(raw_text):
             events.append((get_sec, spk_id, clean_msg))
     return events
 
+def split_sentences(text, max_len=140):
+    """
+    Split long text into sentence or word-boundary chunks (up to max_len chars).
+    Never cuts a word in half.
+    """
+    if len(text) <= max_len:
+        return [text]
+        
+    chunks = []
+    # Try splitting by sentence first (ending in . ! ?)
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    current_chunk = ""
+    
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) > max_len:
+            # Sentence itself is longer than max_len: split by words
+            words = s.split(' ')
+            sub_chunk = ""
+            for w in words:
+                if len(sub_chunk) + len(w) + 1 <= max_len:
+                    sub_chunk = f"{sub_chunk} {w}".strip()
+                else:
+                    if sub_chunk:
+                        chunks.append(sub_chunk)
+                    sub_chunk = w
+            if sub_chunk:
+                chunks.append(sub_chunk)
+        else:
+            if len(current_chunk) + len(s) + 1 <= max_len:
+                current_chunk = f"{current_chunk} {s}".strip()
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = s
+    if current_chunk:
+        chunks.append(current_chunk)
+        
+    return chunks
+
 def pack_mission_events(events):
     # Sort events by get_sec
     events.sort(key=lambda x: x[0])
     buf = bytearray()
-    # Write header:
-    # uint32_t magic = 0x4D495353 ('MISS')
-    # uint32_t event_count (dummy, updated after)
     buf.extend(b'MISS')
     buf.extend(struct.pack('<I', 0))
     
     total_records = 0
     for get_sec, spk_id, text in events:
-        chunks = [text[i:i+230] for i in range(0, len(text), 230)]
+        chunks = split_sentences(text, max_len=140)
+        time_offset = 0
         for chunk in chunks:
             chunk_bytes = chunk.encode('ascii', errors='ignore')
-            buf.extend(struct.pack('<iBB', get_sec, spk_id, len(chunk_bytes)))
+            if len(chunk_bytes) > 250:
+                chunk_bytes = chunk_bytes[:250]
+            # Advance time by 4 seconds for subsequent sentences of a long announcement
+            rec_sec = get_sec + time_offset
+            buf.extend(struct.pack('<iBB', rec_sec, spk_id, len(chunk_bytes)))
             buf.extend(chunk_bytes)
             total_records += 1
+            time_offset += 4
             
-    # Update count
     struct.pack_into('<I', buf, 4, total_records)
     return buf
 
 def filter_mission_events(m_id, events):
-    """Filter events to curated highlights ensuring full continuity during key phases."""
     if m_id == "a17":
-        # Apollo 17: User requested pre-launch is the main star!
-        # Pre-launch hold (-9442s to 0s) + Launch & early orbit (up to 12h = 43200s)
-        # plus Lunar final EVA closing speech (around GET 170h)
         filtered = []
         for e in events:
             sec = e[0]
-            # All pre-launch events (-9000 to 0)
             if sec < 0:
                 filtered.append(e)
-            # Liftoff and first 10 hours
             elif sec <= 3600 * 10:
                 filtered.append(e)
-            # Final EVA closing speech (Gene Cernan's final footsteps on the Moon)
             elif 612000 <= sec <= 618000:
                 filtered.append(e)
         return filtered
     elif m_id == "a11":
-        # Apollo 11: Liftoff (0 to 4h) + Lunar Descent/Landing (102h to 104h) + Lunar EVA (109h to 112h)
         filtered = []
         for e in events:
             sec = e[0]
-            if sec <= 3600 * 4: # Liftoff & Earth orbit
+            if sec <= 3600 * 4:
                 filtered.append(e)
-            elif 3600 * 102 <= sec <= 3600 * 104: # Landing & "The Eagle has landed"
+            elif 3600 * 102 <= sec <= 3600 * 104:
                 filtered.append(e)
-            elif 3600 * 109 <= sec <= 3600 * 112: # EVA & "That's one small step"
+            elif 3600 * 109 <= sec <= 3600 * 112:
                 filtered.append(e)
         return filtered
     elif m_id == "a13":
-        # Apollo 13: Liftoff (0 to 3h) + Crisis ("Houston we've had a problem", 55h to 60h) + Reentry (140h to 143h)
         filtered = []
         for e in events:
             sec = e[0]
             if sec <= 3600 * 3:
                 filtered.append(e)
-            elif 3600 * 55 <= sec <= 3600 * 60: # Crisis & lifeboat activation
+            elif 3600 * 55 <= sec <= 3600 * 60:
                 filtered.append(e)
-            elif 3600 * 140 <= sec <= 3600 * 143: # Reentry & recovery
+            elif 3600 * 140 <= sec <= 3600 * 143:
                 filtered.append(e)
         return filtered
     elif m_id == "a08":
-        # Apollo 8: Liftoff (0 to 3h) + Lunar Orbit & Genesis reading (85h to 88h) + Return (89h to 90h)
         filtered = []
         for e in events:
             sec = e[0]
             if sec <= 3600 * 3:
                 filtered.append(e)
-            elif 3600 * 85 <= sec <= 3600 * 88: # Lunar orbit, Earthrise & Genesis reading
+            elif 3600 * 85 <= sec <= 3600 * 88:
                 filtered.append(e)
-            elif 3600 * 89 <= sec <= 3600 * 90: # "There is a Santa Claus"
+            elif 3600 * 89 <= sec <= 3600 * 90:
                 filtered.append(e)
         return filtered
     return events
 
 def main():
-    print("=== Curating and Packing Apollo Mission Transcripts ===")
+    print("=== Curating and Packing Apollo Mission Transcripts (Clean Boundary Split) ===")
     
     missions = [
-        {"id": "a08", "name": "Apollo 8", "source_type": "spacelog", "cache": "data/a08_raw.txt"},
-        {"id": "a11", "name": "Apollo 11", "source_type": "spacelog", "cache": "data/a11_raw.txt"},
-        {"id": "a13", "name": "Apollo 13", "source_type": "spacelog", "cache": "data/a13_raw.txt"},
-        {"id": "a17", "name": "Apollo 17", "source_type": "apollo17_csv", "cache": "data/a17_raw.txt"},
+        {"id": "a08", "name": "Apollo 8", "source_type": "spacelog", "url": "https://raw.githubusercontent.com/Spacelog/Spacelog/master/missions/a8/transcripts/TEC"},
+        {"id": "a11", "name": "Apollo 11", "source_type": "spacelog", "url": "https://raw.githubusercontent.com/Spacelog/Spacelog/master/missions/a11/transcripts/TEC"},
+        {"id": "a13", "name": "Apollo 13", "source_type": "spacelog", "url": "https://raw.githubusercontent.com/Spacelog/Spacelog/master/missions/a13/transcripts/TEC"},
+        {"id": "a17", "name": "Apollo 17", "source_type": "apollo17_csv", "url": "https://raw.githubusercontent.com/bfeist/Apollo17/master/MISSION_DATA/A17%20master%20TEC%20and%20PAO%20utterances.csv"},
     ]
     
     total_packed_bytes = 0
     
     for m in missions:
-        cache_path = os.path.join(BASE_DIR, m["cache"])
+        cache_path = os.path.join(DATA_DIR, f"{m['id']}_raw.txt")
+        if not os.path.exists(cache_path):
+            print(f"Downloading {m['name']} from {m['url']} ...")
+            req = urllib.request.Request(m['url'], headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as resp, open(cache_path, 'wb') as f:
+                f.write(resp.read())
+            print(f"  Saved to {cache_path}")
+
         with open(cache_path, "r", encoding="utf-8", errors="ignore") as f:
             raw_text = f.read()
             
@@ -242,7 +281,7 @@ def main():
         with open(bin_path, "wb") as f:
             f.write(packed)
             
-        print(f"[{m['name']}] Raw: {len(events)} -> Curated: {len(curated)} events -> Packed: {len(packed)} bytes ({len(packed)/1024:.1f} KB)")
+        print(f"[{m['name']}] Raw: {len(events)} -> Curated: {len(curated)} -> Packed: {len(packed)} bytes ({len(packed)/1024:.1f} KB)")
         total_packed_bytes += len(packed)
         
     print(f"\nTotal curated binary size across all 4 missions: {total_packed_bytes} bytes ({total_packed_bytes/1024:.1f} KB)")

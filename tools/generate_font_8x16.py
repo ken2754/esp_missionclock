@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Convert Linux kernel font_8x16 to clean LVGL 1bpp font.
-Properly strips C comments so 0x hex values inside comments are ignored!
+Properly strips C comments and includes ASCII 0x7F as solid rectangle block cursor.
 """
 
 import urllib.request
@@ -10,23 +10,21 @@ import re
 url = "https://raw.githubusercontent.com/torvalds/linux/master/lib/fonts/font_8x16.c"
 raw = urllib.request.urlopen(url).read().decode('utf-8', errors='ignore')
 
-# CRITICAL FIX: Strip all C comments /* ... */ first!
+# Strip all C comments /* ... */
 clean_code = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
 
-# Now find all 0xHH byte literals
+# Find all 0xHH byte literals
 hex_matches = re.findall(r'0x([0-9a-fA-F]{2})', clean_code)
-print(f"Found {len(hex_matches)} pure data hex bytes (expected 4096)")
 assert len(hex_matches) == 4096, f"Expected 4096, got {len(hex_matches)}"
 
 bytes_data = [int(h, 16) for h in hex_matches]
 
-# We need ASCII 0x20 (' ') to 0x7E ('~') -> 95 glyphs
-# Each glyph is exactly 16 bytes
+# We support ASCII 0x20 (' ') to 0x7F (Block Cursor) -> 96 glyphs
 c_out = []
 c_out.append('#include "term_font_8x16.h"\n')
 c_out.append('// Standard crisp 8x16 monospace ASCII glyphs (pure 1bpp bitmapped, 1px stroke)')
-c_out.append('// Stored as 16 rows of 1 byte each (8 bits per row = 8 horizontal pixels)')
-c_out.append('static const uint8_t s_font_8x16_bitmaps[95][16] = {')
+c_out.append('// 0x20-0x7E: Printable ASCII, 0x7F: Solid rectangle block cursor')
+c_out.append('static const uint8_t s_font_8x16_bitmaps[96][16] = {')
 
 for code in range(0x20, 0x7F):
     char_name = chr(code)
@@ -40,6 +38,11 @@ for code in range(0x20, 0x7F):
     c_out.append(f"    // 0x{code:02X} {char_desc}")
     c_out.append(f"    {{{hex_str}}},")
 
+# Add 0x7F as a crisp solid rectangle cursor (top 14 rows filled, bottom 2 rows spacing or full 16)
+# Full 14-row block leaves 2px descender margin for perfect alignment
+block_cursor = ["0xFF"] * 14 + ["0x00", "0x00"]
+c_out.append("    // 0x7F Solid Rectangle Block Cursor")
+c_out.append(f"    {{{', '.join(block_cursor)}}}")
 c_out.append('};\n')
 
 c_out.append('''static bool term_font_8x16_get_glyph_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc_out,
@@ -51,7 +54,7 @@ c_out.append('''static bool term_font_8x16_get_glyph_dsc(const lv_font_t *font, 
     if (unicode_letter == '\\t') {
         unicode_letter = ' ';
     }
-    if (unicode_letter < 0x20 || unicode_letter > 0x7E) {
+    if (unicode_letter < 0x20 || unicode_letter > 0x7F) {
         return false;
     }
 
@@ -71,7 +74,7 @@ static const uint8_t *term_font_8x16_get_glyph_bitmap(const lv_font_t *font, uin
     if (unicode_letter == '\\t') {
         unicode_letter = ' ';
     }
-    if (unicode_letter < 0x20 || unicode_letter > 0x7E) {
+    if (unicode_letter < 0x20 || unicode_letter > 0x7F) {
         return s_font_8x16_bitmaps[0];
     }
     return s_font_8x16_bitmaps[unicode_letter - 0x20];
@@ -92,4 +95,4 @@ const lv_font_t lv_font_term_8x16 = {
 with open("/home/ken/git/esp_missionclock/main/term_font_8x16.c", "w") as f:
     f.write("\n".join(c_out))
 
-print("Successfully regenerated /home/ken/git/esp_missionclock/main/term_font_8x16.c")
+print("Regenerated /home/ken/git/esp_missionclock/main/term_font_8x16.c with 0x7F Block Cursor.")

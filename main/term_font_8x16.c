@@ -1,8 +1,8 @@
 #include "term_font_8x16.h"
 
 // Standard crisp 8x16 monospace ASCII glyphs (pure 1bpp bitmapped, 1px stroke)
-// Stored as 16 rows of 1 byte each (8 bits per row = 8 horizontal pixels)
-static const uint8_t s_font_8x16_bitmaps[95][16] = {
+// 0x20-0x7E: Printable ASCII, 0x7F: Solid rectangle block cursor
+static const uint8_t s_font_8x16_bitmaps[96][16] = {
     // 0x20 ' '
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
     // 0x21 '!'
@@ -193,6 +193,8 @@ static const uint8_t s_font_8x16_bitmaps[95][16] = {
     {0x00, 0x00, 0x70, 0x18, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x18, 0x18, 0x70, 0x00, 0x00, 0x00, 0x00},
     // 0x7E '~'
     {0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    // 0x7F Solid Rectangle Block Cursor
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
 };
 
 static bool term_font_8x16_get_glyph_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc_out,
@@ -204,7 +206,7 @@ static bool term_font_8x16_get_glyph_dsc(const lv_font_t *font, lv_font_glyph_ds
     if (unicode_letter == '\t') {
         unicode_letter = ' ';
     }
-    if (unicode_letter < 0x20 || unicode_letter > 0x7E) {
+    if (unicode_letter < 0x20 || unicode_letter > 0x7F) {
         return false;
     }
 
@@ -224,7 +226,7 @@ static const uint8_t *term_font_8x16_get_glyph_bitmap(const lv_font_t *font, uin
     if (unicode_letter == '\t') {
         unicode_letter = ' ';
     }
-    if (unicode_letter < 0x20 || unicode_letter > 0x7E) {
+    if (unicode_letter < 0x20 || unicode_letter > 0x7F) {
         return s_font_8x16_bitmaps[0];
     }
     return s_font_8x16_bitmaps[unicode_letter - 0x20];

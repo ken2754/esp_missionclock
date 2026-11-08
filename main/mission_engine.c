@@ -206,10 +206,10 @@ static void mission_engine_task(void *pvParameters)
 
         const mission_info_t *info = mission_data_get_info(s_curr_mission);
         const char *mode_str = (g_settings.time_mode == TIME_MODE_LOCAL_OFFSET) ? "LOC" : "GET";
-        const char *wifi_str = wifi_portal_is_connected() ? "WIFI:OK" :
-                               (wifi_portal_is_ap_active() ? "AP-SETUP" : "STANDBY");
+        const char *ip_str = wifi_portal_is_connected() ? wifi_portal_get_ip() :
+                             (wifi_portal_is_ap_active() ? "192.168.4.1" : "--.--.--.--");
 
-        terminal_ui_update_status(clock_buf, info->id_str, mode_str, wifi_str);
+        terminal_ui_update_status(clock_buf, info->id_str, mode_str, ip_str);
 
         // 1. Check Hourly Joke Trigger (:00:00 to :01:00)
         if (g_settings.hourly_joke_enabled && tm_info.tm_min == 0 && tm_info.tm_sec < 55) {
@@ -251,7 +251,7 @@ static void mission_engine_task(void *pvParameters)
 
                 if (now >= ev_local_sec) {
                     // Time to play this event!
-                    char clean_text[160];
+                    char clean_text[256];
                     int copy_len = ev.text_len < sizeof(clean_text) - 1 ? ev.text_len : sizeof(clean_text) - 1;
                     memcpy(clean_text, ev.text, copy_len);
                     clean_text[copy_len] = '\0';
