@@ -7,7 +7,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <stdlib.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "terminal_ui";
 
@@ -25,40 +27,66 @@ static lv_obj_t *s_status_clock_lbl = NULL;
 static lv_obj_t *s_status_mission_lbl = NULL;
 static lv_obj_t *s_status_wifi_lbl = NULL;
 
-// Circular buffer of recent visible log entries
+// Circular buffer of visible rows
 static terminal_log_entry_t s_entries[LOG_ROWS];
 static int s_entry_count = 0;
 
-static void format_time_str(char *buf, size_t buf_len, const terminal_log_entry_t *e, uint8_t time_mode)
+// Typing animation queue
+#define TYPE_QUEUE_SIZE 32
+typedef struct {
+    int32_t get_sec;
+    int64_t local_sec;
+    uint8_t speaker_id;
+    bool is_joke;
+    bool is_continuation;
+    char text[48];
+} type_chunk_t;
+
+static type_chunk_t s_type_queue[TYPE_QUEUE_SIZE];
+static int s_type_q_head = 0;
+static int s_type_q_tail = 0;
+
+// Active typing animation state
+static bool s_is_typing = false;
+static int  s_typing_row = -1;
+static int  s_typing_pos = 0;
+static char s_typing_full_target[48];
+static int64_t s_typing_next_ms = 0;
+
+// Format timestamp WITHOUT brackets or colons to save screen space
+static void format_time_compact(char *buf, size_t buf_len, const terminal_log_entry_t *e, uint8_t time_mode)
 {
     if (time_mode == TIME_MODE_LOCAL_OFFSET || e->is_joke) {
+        // e.g. "153014" (6 chars)
         time_t t = (time_t)e->local_sec;
         struct tm tm_info;
         localtime_r(&t, &tm_info);
-        snprintf(buf, buf_len, "%02d:%02d:%02d", tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
+        snprintf(buf, buf_len, "%02d%02d%02d", tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
     } else {
         int32_t s = e->get_sec;
         if (s < 0) {
+            // Pre-launch e.g. "-011540" (7 chars)
             int32_t abs_s = -s;
             int h = abs_s / 3600;
             int m = (abs_s % 3600) / 60;
             int sec = abs_s % 60;
-            snprintf(buf, buf_len, "T-%02d:%02d:%02d", h, m, sec);
+            snprintf(buf, buf_len, "-%02d%02d%02d", h, m, sec);
         } else {
+            // Post-launch e.g. "+000123" (7 chars) or "+1D0234" (7 chars)
             int d = s / 86400;
             int h = (s % 86400) / 3600;
             int m = (s % 3600) / 60;
             int sec = s % 60;
             if (d > 0) {
-                snprintf(buf, buf_len, "T+%d:%02d:%02d", d, h, m);
+                snprintf(buf, buf_len, "+%dD%02d%02d", d, h, m);
             } else {
-                snprintf(buf, buf_len, "T+%02d:%02d:%02d", h, m, sec);
+                snprintf(buf, buf_len, "+%02d%02d%02d", h, m, sec);
             }
         }
     }
 }
 
-static void render_row(int r)
+static void render_row_internal(int r, bool show_cursor)
 {
     if (r < 0 || r >= LOG_ROWS || !s_log_labels[r]) return;
 
@@ -71,35 +99,68 @@ static void render_row(int r)
     const app_settings_t *s = settings_mgr_get();
 
     char line_buf[256];
+    char display_text[64];
+    strncpy(display_text, e->text, sizeof(display_text) - 2);
+    display_text[sizeof(display_text) - 2] = '\0';
+    if (show_cursor) {
+        strcat(display_text, "_");
+    }
 
-    if (e->is_continuation) {
-        // Continuation line: indent to align with message text
+    if (e->speaker_id == SPK_OTHER && e->text[0] == '-') {
+        // System banner / silence warp
+        snprintf(line_buf, sizeof(line_buf), "#00aa33 %s#", display_text);
+    } else if (e->is_continuation) {
+        // Continuation line: 11 spaces indent to align with message text
         if (e->is_joke) {
-            snprintf(line_buf, sizeof(line_buf), "                #ffffff %s#", e->text);
+            snprintf(line_buf, sizeof(line_buf), "           #ffffff %s#", display_text);
         } else {
-            snprintf(line_buf, sizeof(line_buf), "                #00ff41 %s#", e->text);
+            snprintf(line_buf, sizeof(line_buf), "           #00ff41 %s#", display_text);
         }
-    } else if (e->speaker_id == SPK_OTHER && e->text[0] == '-') {
-        // System banner / silence warp line
-        snprintf(line_buf, sizeof(line_buf), "#00aa33 %s#", e->text);
     } else {
-        // Standard utterance line
-        char time_buf[24];
-        format_time_str(time_buf, sizeof(time_buf), e, s->time_mode);
+        // Main utterance: Space-saving prefix (No brackets, no colons!)
+        // LOCAL: "153014 CDR " (11 chars) -> leaves 28 chars for text!
+        // HIST:  "-011540 PAO " or "+000123 CDR " (12 chars) -> leaves 27 chars for text!
+        char time_buf[16];
+        format_time_compact(time_buf, sizeof(time_buf), e, s->time_mode);
         const char *spk_tag = mission_data_get_speaker_tag(s->mission_id, e->speaker_id);
 
         if (e->is_joke) {
-            // Bright White for jokes & Easter eggs
-            snprintf(line_buf, sizeof(line_buf), "#aaaaaa [%s]# #ffffff %-4s# #ffffff %s#",
-                     time_buf, spk_tag, e->text);
+            snprintf(line_buf, sizeof(line_buf), "#aaaaaa %s# #ffffff %-3s# #ffffff %s#",
+                     time_buf, spk_tag, display_text);
         } else {
-            // CRT Green palette
-            snprintf(line_buf, sizeof(line_buf), "#007722 [%s]# #00aa33 %-4s# #00ff41 %s#",
-                     time_buf, spk_tag, e->text);
+            snprintf(line_buf, sizeof(line_buf), "#007722 %s# #00aa33 %-3s# #00ff41 %s#",
+                     time_buf, spk_tag, display_text);
         }
     }
 
     lv_label_set_text(s_log_labels[r], line_buf);
+}
+
+static void push_single_row_direct(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke, bool is_continuation)
+{
+    if (s_entry_count < LOG_ROWS) {
+        terminal_log_entry_t *e = &s_entries[s_entry_count];
+        e->get_sec = get_sec;
+        e->local_sec = local_sec;
+        e->speaker_id = speaker_id;
+        e->is_joke = is_joke;
+        e->is_continuation = is_continuation;
+        strncpy(e->text, text, sizeof(e->text) - 1);
+        e->text[sizeof(e->text) - 1] = '\0';
+        s_entry_count++;
+    } else {
+        for (int i = 0; i < LOG_ROWS - 1; i++) {
+            s_entries[i] = s_entries[i + 1];
+        }
+        terminal_log_entry_t *e = &s_entries[LOG_ROWS - 1];
+        e->get_sec = get_sec;
+        e->local_sec = local_sec;
+        e->speaker_id = speaker_id;
+        e->is_joke = is_joke;
+        e->is_continuation = is_continuation;
+        strncpy(e->text, text, sizeof(e->text) - 1);
+        e->text[sizeof(e->text) - 1] = '\0';
+    }
 }
 
 void terminal_ui_init(void)
@@ -133,21 +194,21 @@ void terminal_ui_init(void)
     lv_obj_set_style_border_width(s_divider, 0, LV_PART_MAIN);
     lv_obj_clear_flag(s_divider, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Status bar: Clock label (Left)
+    // Status bar: Clock label (Left) - Kept as-is
     s_status_clock_lbl = lv_label_create(s_scr);
     lv_obj_set_pos(s_status_clock_lbl, 6, STATUS_BAR_Y + 5);
     lv_label_set_recolor(s_status_clock_lbl, true);
     lv_obj_set_style_text_font(s_status_clock_lbl, &lv_font_term_8x16, LV_PART_MAIN);
     lv_label_set_text(s_status_clock_lbl, "#00ff41 00:00:00 JST#");
 
-    // Status bar: Mission & Mode label (Center)
+    // Status bar: Mission & Mode label (Center) - Kept as-is
     s_status_mission_lbl = lv_label_create(s_scr);
     lv_obj_set_pos(s_status_mission_lbl, 136, STATUS_BAR_Y + 5);
     lv_label_set_recolor(s_status_mission_lbl, true);
     lv_obj_set_style_text_font(s_status_mission_lbl, &lv_font_term_8x16, LV_PART_MAIN);
     lv_label_set_text(s_status_mission_lbl, "#00aa33 A17 [LOCAL]#");
 
-    // Status bar: WiFi status label (Right)
+    // Status bar: WiFi status label (Right) - Kept as-is
     s_status_wifi_lbl = lv_label_create(s_scr);
     lv_obj_set_pos(s_status_wifi_lbl, 244, STATUS_BAR_Y + 5);
     lv_label_set_recolor(s_status_wifi_lbl, true);
@@ -156,100 +217,140 @@ void terminal_ui_init(void)
 
     if (s_lvgl_mux) xSemaphoreGive(s_lvgl_mux);
 
-    ESP_LOGI(TAG, "Terminal UI initialized (12 lines, crisp 8x16 font, 39 chars/line).");
+    ESP_LOGI(TAG, "Terminal UI initialized with space-saving compact timestamps and typewriter animation.");
 }
 
-static void push_single_row(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke, bool is_continuation)
+static void enqueue_chunk(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke, bool is_continuation)
 {
-    if (s_entry_count < LOG_ROWS) {
-        terminal_log_entry_t *e = &s_entries[s_entry_count];
-        e->get_sec = get_sec;
-        e->local_sec = local_sec;
-        e->speaker_id = speaker_id;
-        e->is_joke = is_joke;
-        e->is_continuation = is_continuation;
-        strncpy(e->text, text, sizeof(e->text) - 1);
-        e->text[sizeof(e->text) - 1] = '\0';
-        s_entry_count++;
-    } else {
-        // Shift rows up
-        for (int i = 0; i < LOG_ROWS - 1; i++) {
-            s_entries[i] = s_entries[i + 1];
-        }
-        terminal_log_entry_t *e = &s_entries[LOG_ROWS - 1];
-        e->get_sec = get_sec;
-        e->local_sec = local_sec;
-        e->speaker_id = speaker_id;
-        e->is_joke = is_joke;
-        e->is_continuation = is_continuation;
-        strncpy(e->text, text, sizeof(e->text) - 1);
-        e->text[sizeof(e->text) - 1] = '\0';
+    int next_tail = (s_type_q_tail + 1) % TYPE_QUEUE_SIZE;
+    if (next_tail == s_type_q_head) {
+        // Queue full: drop oldest
+        s_type_q_head = (s_type_q_head + 1) % TYPE_QUEUE_SIZE;
     }
+    type_chunk_t *item = &s_type_queue[s_type_q_tail];
+    item->get_sec = get_sec;
+    item->local_sec = local_sec;
+    item->speaker_id = speaker_id;
+    item->is_joke = is_joke;
+    item->is_continuation = is_continuation;
+    strncpy(item->text, text, sizeof(item->text) - 1);
+    item->text[sizeof(item->text) - 1] = '\0';
+    s_type_q_tail = next_tail;
 }
 
 void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke)
 {
     if (!text || strlen(text) == 0) return;
-    if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
 
-    // If it's a system banner (starts with ---), just push 1 row
     if (text[0] == '-') {
-        push_single_row(get_sec, local_sec, speaker_id, text, is_joke, false);
+        // System banner / silence warp: enqueue directly
+        enqueue_chunk(get_sec, local_sec, speaker_id, text, is_joke, false);
     } else {
-        // Word wrap: First line has ~22 chars available, continuation lines have ~22 chars available
-        const int first_max = 22;
-        const int cont_max  = 22;
+        // Compact prefix width:
+        // Main line: 11 chars (LOCAL: "153014 CDR " or HIST: "+000123 CDR ")
+        // Remaining space for message: 39 - 11 = 28 characters!
+        // Continuation line: 11 spaces indent -> 28 characters!
+        const int line_max = 27;
 
         const char *p = text;
         bool is_first = true;
 
         while (*p) {
-            while (*p == ' ') p++; // skip leading spaces
+            while (*p == ' ') p++;
             if (!*p) break;
 
-            int limit = is_first ? first_max : cont_max;
             int len = strlen(p);
-
-            if (len <= limit) {
-                // Remainder fits
-                push_single_row(get_sec, local_sec, speaker_id, p, is_joke, !is_first);
+            if (len <= line_max) {
+                enqueue_chunk(get_sec, local_sec, speaker_id, p, is_joke, !is_first);
                 break;
             } else {
-                // Find last space before limit
-                int split = limit;
+                int split = line_max;
                 while (split > 0 && p[split] != ' ') {
                     split--;
                 }
-                if (split == 0) {
-                    // No space found, hard cut
-                    split = limit;
-                }
+                if (split == 0) split = line_max;
 
                 char chunk[32];
                 int copy_bytes = split < sizeof(chunk) - 1 ? split : sizeof(chunk) - 1;
                 strncpy(chunk, p, copy_bytes);
                 chunk[copy_bytes] = '\0';
 
-                push_single_row(get_sec, local_sec, speaker_id, chunk, is_joke, !is_first);
+                enqueue_chunk(get_sec, local_sec, speaker_id, chunk, is_joke, !is_first);
                 p += split;
                 is_first = false;
             }
         }
     }
+}
 
-    // Re-render visible rows
-    for (int i = 0; i < s_entry_count; i++) {
-        render_row(i);
+// Step typing animation with human cadence and moving cursor
+static void update_typing_animation(int64_t now_ms)
+{
+    if (!s_is_typing) {
+        if (s_type_q_head != s_type_q_tail) {
+            // Dequeue next line
+            type_chunk_t item = s_type_queue[s_type_q_head];
+            s_type_q_head = (s_type_q_head + 1) % TYPE_QUEUE_SIZE;
+
+            // Push an empty row onto the screen buffer
+            push_single_row_direct(item.get_sec, item.local_sec, item.speaker_id, "", item.is_joke, item.is_continuation);
+            s_typing_row = s_entry_count - 1;
+
+            strncpy(s_typing_full_target, item.text, sizeof(s_typing_full_target) - 1);
+            s_typing_full_target[sizeof(s_typing_full_target) - 1] = '\0';
+
+            s_typing_pos = 0;
+            s_is_typing = true;
+            s_typing_next_ms = now_ms + 40;
+
+            // Re-render preceding static rows
+            for (int i = 0; i < s_typing_row; i++) {
+                render_row_internal(i, false);
+            }
+            // Render current row with initial cursor
+            render_row_internal(s_typing_row, true);
+        }
+    } else {
+        if (now_ms >= s_typing_next_ms) {
+            int target_len = strlen(s_typing_full_target);
+            if (s_typing_pos < target_len) {
+                // Type next character
+                char next_ch = s_typing_full_target[s_typing_pos];
+                s_typing_pos++;
+
+                s_entries[s_typing_row].text[s_typing_pos - 1] = next_ch;
+                s_entries[s_typing_row].text[s_typing_pos] = '\0';
+
+                // Render with moving cursor '_'
+                render_row_internal(s_typing_row, true);
+
+                // Calculate human-like typing delay with realistic hesitation
+                int delay_ms;
+                if (next_ch == '.' || next_ch == '!' || next_ch == '?') {
+                    delay_ms = 180 + (rand() % 100); // Sentence hesitation (180-280ms)
+                } else if (next_ch == ',' || next_ch == ';') {
+                    delay_ms = 100 + (rand() % 60);  // Clause pause (100-160ms)
+                } else if (next_ch == ' ') {
+                    delay_ms = 60 + (rand() % 50);   // Space gap (60-110ms)
+                } else {
+                    delay_ms = 25 + (rand() % 35);   // Natural keypress cadence (25-60ms)
+                }
+                s_typing_next_ms = now_ms + delay_ms;
+            } else {
+                // Done typing this line: remove cursor
+                render_row_internal(s_typing_row, false);
+                s_is_typing = false;
+                s_typing_next_ms = now_ms + 60; // Brief pause before next line
+            }
+        }
     }
-
-    if (s_lvgl_mux) xSemaphoreGive(s_lvgl_mux);
 }
 
 void terminal_ui_refresh_all_lines(void)
 {
     if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
     for (int i = 0; i < s_entry_count; i++) {
-        render_row(i);
+        render_row_internal(i, (s_is_typing && i == s_typing_row));
     }
     if (s_lvgl_mux) xSemaphoreGive(s_lvgl_mux);
 }
@@ -277,6 +378,8 @@ void terminal_ui_update_status(const char *clock_str, const char *mission_str, c
 void terminal_ui_timer_handler(void)
 {
     if (s_lvgl_mux && xSemaphoreTake(s_lvgl_mux, pdMS_TO_TICKS(10)) == pdTRUE) {
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        update_typing_animation(now_ms);
         lv_timer_handler();
         xSemaphoreGive(s_lvgl_mux);
     }
@@ -286,6 +389,9 @@ void terminal_ui_clear(void)
 {
     if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
     s_entry_count = 0;
+    s_type_q_head = 0;
+    s_type_q_tail = 0;
+    s_is_typing = false;
     for (int i = 0; i < LOG_ROWS; i++) {
         if (s_log_labels[i]) lv_label_set_text_static(s_log_labels[i], "");
     }

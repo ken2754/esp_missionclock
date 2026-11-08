@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Convert Linux kernel font_8x16 to LVGL 1bpp font.
+Convert Linux kernel font_8x16 to clean LVGL 1bpp font.
+Properly strips C comments so 0x hex values inside comments are ignored!
 """
 
 import urllib.request
@@ -9,19 +10,21 @@ import re
 url = "https://raw.githubusercontent.com/torvalds/linux/master/lib/fonts/font_8x16.c"
 raw = urllib.request.urlopen(url).read().decode('utf-8', errors='ignore')
 
-# Extract hex values from fontdata_8x16
-# 256 characters * 16 bytes = 4096 bytes
-hex_matches = re.findall(r'0x([0-9a-fA-F]{2})', raw)
-print(f"Found {len(hex_matches)} hex bytes in fontdata_8x16")
-assert len(hex_matches) >= 4096
+# CRITICAL FIX: Strip all C comments /* ... */ first!
+clean_code = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
 
-bytes_data = [int(h, 16) for h in hex_matches[:4096]]
+# Now find all 0xHH byte literals
+hex_matches = re.findall(r'0x([0-9a-fA-F]{2})', clean_code)
+print(f"Found {len(hex_matches)} pure data hex bytes (expected 4096)")
+assert len(hex_matches) == 4096, f"Expected 4096, got {len(hex_matches)}"
 
-# We only need ASCII 0x20 (' ') to 0x7E ('~') -> 95 glyphs
-# Each glyph is 16 bytes
+bytes_data = [int(h, 16) for h in hex_matches]
+
+# We need ASCII 0x20 (' ') to 0x7E ('~') -> 95 glyphs
+# Each glyph is exactly 16 bytes
 c_out = []
 c_out.append('#include "term_font_8x16.h"\n')
-c_out.append('// Standard crisp 8x16 monospace ASCII glyphs (1px stroke, non-scaled)')
+c_out.append('// Standard crisp 8x16 monospace ASCII glyphs (pure 1bpp bitmapped, 1px stroke)')
 c_out.append('// Stored as 16 rows of 1 byte each (8 bits per row = 8 horizontal pixels)')
 c_out.append('static const uint8_t s_font_8x16_bitmaps[95][16] = {')
 
@@ -52,7 +55,7 @@ c_out.append('''static bool term_font_8x16_get_glyph_dsc(const lv_font_t *font, 
         return false;
     }
 
-    dsc_out->adv_w = 8;   // 8px character advance width
+    dsc_out->adv_w = 8;   // Exactly 8px horizontal advance
     dsc_out->box_w = 8;   // 8px box width (1 byte per row)
     dsc_out->box_h = 16;  // 16 rows high
     dsc_out->ofs_x = 0;
@@ -89,4 +92,4 @@ const lv_font_t lv_font_term_8x16 = {
 with open("/home/ken/git/esp_missionclock/main/term_font_8x16.c", "w") as f:
     f.write("\n".join(c_out))
 
-print("Successfully generated /home/ken/git/esp_missionclock/main/term_font_8x16.c")
+print("Successfully regenerated /home/ken/git/esp_missionclock/main/term_font_8x16.c")
