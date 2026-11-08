@@ -25,6 +25,8 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
 void terminal_ui_refresh_all_lines(void);
 void terminal_ui_update_status(const char *clock_str, const char *mission_str, const char *mode_str, const char *wifi_str);
 void terminal_ui_clear(void);
+int terminal_ui_get_queue_count(void);
+bool terminal_ui_is_typing(void);
 
 #ifdef __cplusplus
 }

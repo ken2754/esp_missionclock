@@ -20,6 +20,7 @@ static mission_id_t s_curr_mission = MISSION_APOLLO_17;
 static uint32_t s_curr_event_idx = 0;
 static int64_t s_base_local_sec = 0; // Local time corresponding to GET = 0
 static bool s_engine_running = false;
+static bool s_sntp_synced_once = false;
 
 // Hourly Joke state
 static int s_last_joke_hour = -1;
@@ -53,9 +54,9 @@ static void reset_timeline(mission_id_t mission_id)
         // We set s_base_local_sec such that the first event triggers NOW
         // T_event_local = s_base_local_sec + first_ev.get_sec = now
         // => s_base_local_sec = now - first_ev.get_sec
-        s_base_local_sec = now - first_ev.get_sec;
+        s_base_local_sec = (int64_t)now - (int64_t)first_ev.get_sec;
     } else {
-        s_base_local_sec = now;
+        s_base_local_sec = (int64_t)now;
     }
 
     terminal_ui_clear();
@@ -63,10 +64,21 @@ static void reset_timeline(mission_id_t mission_id)
     const mission_info_t *info = mission_data_get_info(s_curr_mission);
     char banner[128];
     snprintf(banner, sizeof(banner), "--- MISSION INITIALIZED: %s (%s) ---", info->full_name, info->subtitle);
-    terminal_ui_add_log(0, now, SPK_OTHER, banner, false);
+    terminal_ui_add_log(first_ev.get_sec, now, SPK_OTHER, banner, false);
 
-    ESP_LOGI(TAG, "Timeline reset for mission %d (%s). Base local sec: %lld",
-             s_curr_mission, info->full_name, (long long)s_base_local_sec);
+    ESP_LOGI(TAG, "Timeline reset for mission %d (%s). Base local sec: %lld (Now: %lld, First GET: %ld)",
+             s_curr_mission, info->full_name, (long long)s_base_local_sec, (long long)now, (long)first_ev.get_sec);
+}
+
+void mission_engine_on_time_synced(void)
+{
+    time_t now = sntp_time_get_epoch();
+    ESP_LOGI(TAG, "SNTP time synced notification: %lld", (long long)now);
+
+    if (!s_sntp_synced_once) {
+        s_sntp_synced_once = true;
+        reset_timeline(s_curr_mission);
+    }
 }
 
 void mission_engine_init(void)
@@ -192,7 +204,27 @@ static void trigger_hourly_joke_step(time_t now, int hour)
 
 static void mission_engine_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Mission Engine Task started.");
+    ESP_LOGI(TAG, "Mission Engine Task started. Waiting for initial time sync...");
+
+    // Wait up to 5 seconds for Wi-Fi and SNTP sync
+    int wait_ticks = 0;
+    while (!sntp_time_is_synced() && wait_ticks < 50) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wait_ticks++;
+
+        time_t now = sntp_time_get_epoch();
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        char clock_buf[32];
+        strftime(clock_buf, sizeof(clock_buf), "%H:%M:%S", &tm_info);
+
+        const mission_info_t *info = mission_data_get_info(s_curr_mission);
+        const char *ip_str = wifi_portal_is_connected() ? wifi_portal_get_ip() :
+                             (wifi_portal_is_ap_active() ? "192.168.4.1" : "--.--.--.--");
+        terminal_ui_update_status(clock_buf, info->id_str, "LOC", ip_str);
+    }
+
+    s_sntp_synced_once = sntp_time_is_synced();
     reset_timeline(g_settings.mission_id);
 
     while (1) {
@@ -211,7 +243,7 @@ static void mission_engine_task(void *pvParameters)
 
         terminal_ui_update_status(clock_buf, info->id_str, mode_str, ip_str);
 
-        // 1. Check Hourly Joke Trigger (:00:00 to :01:00)
+        // 1. Check Hourly Joke Trigger (:00:00 to :00:55)
         if (g_settings.hourly_joke_enabled && tm_info.tm_min == 0 && tm_info.tm_sec < 55) {
             if (s_last_joke_hour != tm_info.tm_hour && !s_joke_in_progress) {
                 // Check if any historical event is scheduled within the next 60 seconds
@@ -224,8 +256,8 @@ static void mission_engine_task(void *pvParameters)
                     }
                 }
 
-                if (!event_in_window && tm_info.tm_sec >= 4) {
-                    // Start joke easter egg!
+                if (!event_in_window && tm_info.tm_sec >= 4 && !terminal_ui_is_typing()) {
+                    // Start joke easter egg in bright white text
                     s_last_joke_hour = tm_info.tm_hour;
                     s_joke_in_progress = true;
                     s_joke_step = 0;
@@ -242,49 +274,44 @@ static void mission_engine_task(void *pvParameters)
             }
         }
 
-        // 2. Advance Historical Transcript Timeline
+        // 2. Advance Historical Transcript Timeline with Strict Real-Time Cadence
         uint32_t total_events = mission_data_get_count(s_curr_mission);
-        if (s_curr_event_idx < total_events) {
+        while (s_curr_event_idx < total_events) {
             mission_event_t ev;
-            if (mission_data_get_event(s_curr_mission, s_curr_event_idx, &ev)) {
-                int64_t ev_local_sec = s_base_local_sec + ev.get_sec;
-
-                if (now >= ev_local_sec) {
-                    // Time to play this event!
-                    char clean_text[256];
-                    int copy_len = ev.text_len < sizeof(clean_text) - 1 ? ev.text_len : sizeof(clean_text) - 1;
-                    memcpy(clean_text, ev.text, copy_len);
-                    clean_text[copy_len] = '\0';
-
-                    terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false);
-                    s_curr_event_idx++;
-
-                    // Smart Warp check: If next event is > 2 minutes away, compress gap
-                    if (g_settings.smart_warp_enabled && s_curr_event_idx < total_events) {
-                        mission_event_t next_ev;
-                        if (mission_data_get_event(s_curr_mission, s_curr_event_idx, &next_ev)) {
-                            int32_t gap_sec = next_ev.get_sec - ev.get_sec;
-                            if (gap_sec > 120) {
-                                // Long gap! Wait 12 seconds, then shift s_base_local_sec to jump the gap
-                                int gap_min = gap_sec / 60;
-                                char warp_msg[128];
-                                snprintf(warp_msg, sizeof(warp_msg), "--- [%d MINUTES OF ORBITAL SILENCE] ---", gap_min);
-                                terminal_ui_add_log(ev.get_sec + 6, now + 6, SPK_OTHER, warp_msg, false);
-
-                                // Shift base time so next event occurs in ~14 seconds
-                                s_base_local_sec = (now + 14) - next_ev.get_sec;
-                            }
-                        }
-                    }
-                }
+            if (!mission_data_get_event(s_curr_mission, s_curr_event_idx, &ev)) {
+                break;
             }
-        } else {
+            int64_t ev_local_sec = s_base_local_sec + ev.get_sec;
+
+            if (now < ev_local_sec) {
+                // Historical silence: strictly wait until the authentic historical second arrives!
+                // Terminal sits silently with the solid block cursor blinking.
+                break;
+            }
+
+            // Current time caught up or passed scheduled time (now >= ev_local_sec)
+            // Limit feeding if typing queue is busy so we don't drop lines
+            if (terminal_ui_get_queue_count() > 3) {
+                break;
+            }
+
+            // Feed next due utterance to terminal UI
+            char clean_text[256];
+            int copy_len = ev.text_len < sizeof(clean_text) - 1 ? ev.text_len : sizeof(clean_text) - 1;
+            memcpy(clean_text, ev.text, copy_len);
+            clean_text[copy_len] = '\0';
+
+            terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false);
+            s_curr_event_idx++;
+        }
+
+        if (s_curr_event_idx >= total_events) {
             // Mission completed, loop back after a short pause
             vTaskDelay(pdMS_TO_TICKS(15000));
             reset_timeline(s_curr_mission);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500)); // Poll every 500ms
+        vTaskDelay(pdMS_TO_TICKS(100)); // Poll every 100ms
     }
 }
 

@@ -19,7 +19,7 @@ static void set_defaults(app_settings_t *s)
     s->mission_id = MISSION_APOLLO_17; // Default to Apollo 17 (pre-launch countdown & hold!)
     s->time_mode = TIME_MODE_LOCAL_OFFSET;
     s->hourly_joke_enabled = true;
-    s->smart_warp_enabled = true;
+    s->smart_warp_enabled = false;
 }
 
 esp_err_t settings_mgr_init(void)

@@ -57,6 +57,7 @@ void app_main(void)
 
     // 5. Initialize Mission Engine Data
     mission_engine_init();
+    sntp_time_set_sync_cb(mission_engine_on_time_synced);
 
     // 6. Initialize Wi-Fi & Captive Portal / SNTP
     ESP_ERROR_CHECK(wifi_portal_init(on_wifi_state_changed));

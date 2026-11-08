@@ -44,9 +44,16 @@ void sntp_time_restart(void)
     esp_sntp_init();
 }
 
-esp_err_t sntp_time_init(sntp_sync_cb_t cb)
+void sntp_time_set_sync_cb(sntp_sync_cb_t cb)
 {
     s_sync_cb = cb;
+}
+
+esp_err_t sntp_time_init(sntp_sync_cb_t cb)
+{
+    if (cb) {
+        s_sync_cb = cb;
+    }
     const app_settings_t *s = settings_mgr_get();
     sntp_time_update_tz(s->timezone);
     sntp_time_restart();

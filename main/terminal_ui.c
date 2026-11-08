@@ -253,9 +253,9 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
         enqueue_chunk(get_sec, local_sec, speaker_id, text, is_joke, false);
     } else {
         // Line width capacity:
-        // Main line: 11-12 chars prefix ("153014 CDR " or "-011540 PAO ") -> 27 chars available for text
+        // Main line: 11-12 chars prefix ("153014 CDR " or "-011540 PAO ") -> 26 chars available for text
         // Continuation line: 2-space indent ("  ") -> 37 - 2 = 35 chars available for text!
-        const int first_max = 27;
+        const int first_max = 26;
         const int cont_max  = 35;
 
         const char *p = text;
@@ -300,6 +300,10 @@ static void update_typing_animation(int64_t now_ms)
         s_cursor_next_blink_ms = now_ms + 350;
         if (s_is_typing && s_typing_row >= 0) {
             render_row_internal(s_typing_row, true);
+        } else if (s_entry_count > 0) {
+            render_row_internal(s_entry_count - 1, true);
+        } else if (s_log_labels[0]) {
+            lv_label_set_text(s_log_labels[0], s_cursor_blink_on ? "#00ff41 \x7f#" : "");
         }
     }
 
@@ -320,7 +324,7 @@ static void update_typing_animation(int64_t now_ms)
             s_is_typing = true;
             s_typing_next_ms = now_ms + 30;
 
-            // Re-render preceding static rows
+            // Re-render preceding static rows (clears previous cursors)
             for (int i = 0; i < s_typing_row; i++) {
                 render_row_internal(i, false);
             }
@@ -358,8 +362,8 @@ static void update_typing_animation(int64_t now_ms)
                 }
                 s_typing_next_ms = now_ms + delay_ms;
             } else {
-                // Done typing this line: remove cursor
-                render_row_internal(s_typing_row, false);
+                // Done typing this line: keep cursor blinking at end of line
+                render_row_internal(s_typing_row, true);
                 s_is_typing = false;
                 s_typing_next_ms = now_ms + 40; // Brief pause before next line
             }
@@ -371,7 +375,8 @@ void terminal_ui_refresh_all_lines(void)
 {
     if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
     for (int i = 0; i < s_entry_count; i++) {
-        render_row_internal(i, (s_is_typing && i == s_typing_row));
+        bool show_cur = (s_is_typing && i == s_typing_row) || (!s_is_typing && i == s_entry_count - 1);
+        render_row_internal(i, show_cur);
     }
     if (s_lvgl_mux) xSemaphoreGive(s_lvgl_mux);
 }
@@ -414,8 +419,19 @@ void terminal_ui_clear(void)
     s_type_q_head = 0;
     s_type_q_tail = 0;
     s_is_typing = false;
+    s_typing_row = -1;
     for (int i = 0; i < LOG_ROWS; i++) {
         if (s_log_labels[i]) lv_label_set_text_static(s_log_labels[i], "");
     }
     if (s_lvgl_mux) xSemaphoreGive(s_lvgl_mux);
+}
+
+int terminal_ui_get_queue_count(void)
+{
+    return (s_type_q_tail - s_type_q_head + TYPE_QUEUE_SIZE) % TYPE_QUEUE_SIZE;
+}
+
+bool terminal_ui_is_typing(void)
+{
+    return s_is_typing || (s_type_q_head != s_type_q_tail);
 }
