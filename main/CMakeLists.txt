@@ -6,6 +6,7 @@ idf_component_register(
         "touch_driver.c"
         "sntp_time.c"
         "wifi_portal.c"
+        "term_font_8x16.c"
         "terminal_ui.c"
         "mission_data.c"
         "mission_engine.c"

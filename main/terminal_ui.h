@@ -15,6 +15,7 @@ typedef struct {
     int64_t local_sec;          // Offset local time (Unix timestamp seconds)
     uint8_t speaker_id;         // Speaker identifier
     bool is_joke;               // True: Render in Bright White (#ffffff); False: CRT Green
+    bool is_continuation;       // True: Continuation line of previous utterance (indented)
     char text[160];             // Message content
 } terminal_log_entry_t;
 
