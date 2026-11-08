@@ -1,0 +1,32 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "settings_mgr.c"
+        "display_driver.c"
+        "touch_driver.c"
+        "sntp_time.c"
+        "wifi_portal.c"
+        "terminal_ui.c"
+        "mission_data.c"
+        "mission_engine.c"
+    INCLUDE_DIRS
+        "."
+    EMBED_FILES
+        "data/mission_a08.bin"
+        "data/mission_a11.bin"
+        "data/mission_a13.bin"
+        "data/mission_a17.bin"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_http_server
+        esp_timer
+        esp_lcd
+        esp_lcd_ili9341
+        lvgl
+        driver
+        freertos
+        esp_netif
+        lwip
+)
