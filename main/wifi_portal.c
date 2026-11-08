@@ -80,11 +80,6 @@ static const char HTML_PAGE[] =
 "<option value='1' %s>Enabled (Houston time checks & surreal banter in White)</option>"
 "<option value='0' %s>Disabled (Historical transcript only)</option>"
 "</select>"
-"<label>Smart Silence Warp</label>"
-"<select name='warp'>"
-"<option value='1' %s>Enabled (Fast-forward long silences &gt;2 min to ~15s)</option>"
-"<option value='0' %s>Disabled (Strict real-time delay including sleep periods)</option>"
-"</select>"
 "<h3>[ System & Display ]</h3>"
 "<label>Timezone (POSIX)</label><input type='text' name='tz' value='%s' placeholder='JST-9'>"
 "<label>Display Brightness</label>"
@@ -117,8 +112,6 @@ static esp_err_t root_get_handler(httpd_req_t *req)
              (s->time_mode == 1) ? "selected" : "",
              s->hourly_joke_enabled ? "selected" : "",
              !s->hourly_joke_enabled ? "selected" : "",
-             s->smart_warp_enabled ? "selected" : "",
-             !s->smart_warp_enabled ? "selected" : "",
              s->timezone,
              (s->brightness == 100) ? "selected" : "",
              (s->brightness == 50) ? "selected" : "",
@@ -196,8 +189,6 @@ static esp_err_t save_post_handler(httpd_req_t *req)
                 new_s.time_mode = atoi(decoded);
             } else if (strcmp(key, "joke") == 0) {
                 new_s.hourly_joke_enabled = (atoi(decoded) != 0);
-            } else if (strcmp(key, "warp") == 0) {
-                new_s.smart_warp_enabled = (atoi(decoded) != 0);
             } else if (strcmp(key, "tz") == 0) {
                 strncpy(new_s.timezone, decoded, sizeof(new_s.timezone) - 1);
             } else if (strcmp(key, "bright") == 0) {

@@ -19,7 +19,6 @@ static void set_defaults(app_settings_t *s)
     s->mission_id = MISSION_APOLLO_17; // Default to Apollo 17 (pre-launch countdown & hold!)
     s->time_mode = TIME_MODE_LOCAL_OFFSET;
     s->hourly_joke_enabled = true;
-    s->smart_warp_enabled = false;
 }
 
 esp_err_t settings_mgr_init(void)
@@ -87,13 +86,9 @@ esp_err_t settings_mgr_load(app_settings_t *settings)
         settings->hourly_joke_enabled = (u8_val != 0);
     }
 
-    if (nvs_get_u8(handle, "warp_en", &u8_val) == ESP_OK) {
-        settings->smart_warp_enabled = (u8_val != 0);
-    }
-
     nvs_close(handle);
-    ESP_LOGI(TAG, "Settings loaded: mission=%d, mode=%d, joke=%d, warp=%d",
-             settings->mission_id, settings->time_mode, settings->hourly_joke_enabled, settings->smart_warp_enabled);
+    ESP_LOGI(TAG, "Settings loaded: mission=%d, mode=%d, joke=%d",
+             settings->mission_id, settings->time_mode, settings->hourly_joke_enabled);
     return ESP_OK;
 }
 
@@ -113,7 +108,6 @@ esp_err_t settings_mgr_save(const app_settings_t *settings)
     nvs_set_u8(handle, "mission_id", settings->mission_id);
     nvs_set_u8(handle, "time_mode", settings->time_mode);
     nvs_set_u8(handle, "joke_en", settings->hourly_joke_enabled ? 1 : 0);
-    nvs_set_u8(handle, "warp_en", settings->smart_warp_enabled ? 1 : 0);
 
     ret = nvs_commit(handle);
     nvs_close(handle);

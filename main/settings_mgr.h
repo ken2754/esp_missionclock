@@ -17,7 +17,6 @@ typedef struct {
     uint8_t mission_id;             // mission_id_t (0: A8, 1: A11, 2: A13, 3: A17)
     uint8_t time_mode;              // time_display_mode_t (0: LOCAL_OFFSET, 1: HISTORICAL_GET)
     bool hourly_joke_enabled;       // Enable hourly easter egg conversation (:00-:01)
-    bool smart_warp_enabled;        // Compress long silent gaps (>2 min) to ~15s
 } app_settings_t;
 
 extern app_settings_t g_settings;
