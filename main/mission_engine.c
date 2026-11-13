@@ -20,7 +20,10 @@ static mission_id_t s_curr_mission = MISSION_APOLLO_17;
 static uint32_t s_curr_event_idx = 0;
 static int64_t s_base_local_sec = 0; // Local time corresponding to GET = 0
 static bool s_engine_running = false;
-static bool s_sntp_synced_once = false;
+static volatile bool s_sntp_synced_once = false;
+static volatile bool s_pending_sync_reset = false;
+static volatile bool s_pending_mission_switch = false;
+static volatile mission_id_t s_pending_mission_id = MISSION_APOLLO_17;
 
 // 1-Hour Intermission state between completed missions
 static bool s_mission_intermission = false;
@@ -54,7 +57,7 @@ static void reset_timeline(mission_id_t mission_id)
     }
 
     // Get the first event's GET
-    mission_event_t first_ev;
+    mission_event_t first_ev = {0};
     if (mission_data_get_event(s_curr_mission, 0, &first_ev)) {
         // We set s_base_local_sec such that the first event triggers NOW
         // T_event_local = s_base_local_sec + first_ev.get_sec = now
@@ -69,7 +72,7 @@ static void reset_timeline(mission_id_t mission_id)
     const mission_info_t *info = mission_data_get_info(s_curr_mission);
     char banner[128];
     snprintf(banner, sizeof(banner), "--- MISSION INITIALIZED: %s (%s) ---", info->full_name, info->subtitle);
-    terminal_ui_add_log(first_ev.get_sec, now, SPK_OTHER, banner, false);
+    terminal_ui_add_log(first_ev.get_sec, now, SPK_OTHER, banner, false, false);
 
     ESP_LOGI(TAG, "Timeline reset for mission %d (%s). Base local sec: %lld (Now: %lld, First GET: %ld)",
              s_curr_mission, info->full_name, (long long)s_base_local_sec, (long long)now, (long)first_ev.get_sec);
@@ -82,7 +85,7 @@ void mission_engine_on_time_synced(void)
 
     if (!s_sntp_synced_once) {
         s_sntp_synced_once = true;
-        reset_timeline(s_curr_mission);
+        s_pending_sync_reset = true;
     }
 }
 
@@ -96,7 +99,8 @@ void mission_engine_set_mission(mission_id_t id)
 {
     if (id >= MISSION_COUNT) return;
     settings_mgr_set_mission(id);
-    reset_timeline(id);
+    s_pending_mission_id = id;
+    s_pending_mission_switch = true;
 }
 
 void mission_engine_handle_touch(int screen_x, int screen_y)
@@ -150,7 +154,7 @@ static void trigger_hourly_joke_step(time_t now, int hour)
                 spk = SPK_LMP;
                 break;
         }
-        terminal_ui_add_log(0, now, spk, text, true);
+        terminal_ui_add_log(0, now, spk, text, true, false);
         s_joke_step = 1;
         s_joke_step_due_sec = now + 9; // 9 seconds later CAPCOM replies
     } else if (s_joke_step == 1) {
@@ -176,7 +180,7 @@ static void trigger_hourly_joke_step(time_t now, int hour)
                 snprintf(text, sizeof(text), "It's %s. Forecast is 100%% sunshine, high of 260 degrees, zero rain.", hour_word);
                 break;
         }
-        terminal_ui_add_log(0, now, spk, text, true);
+        terminal_ui_add_log(0, now, spk, text, true, false);
         s_joke_step = 2;
         s_joke_step_due_sec = now + 8; // 8 seconds later astronaut acknowledges
     } else if (s_joke_step == 2) {
@@ -207,7 +211,7 @@ static void trigger_hourly_joke_step(time_t now, int hour)
                 spk = SPK_LMP;
                 break;
         }
-        terminal_ui_add_log(0, now, spk, text, true);
+        terminal_ui_add_log(0, now, spk, text, true, false);
         s_joke_step = 3; // Done
         s_joke_in_progress = false;
     }
@@ -236,9 +240,18 @@ static void mission_engine_task(void *pvParameters)
     }
 
     s_sntp_synced_once = sntp_time_is_synced();
+    s_pending_sync_reset = false;
     reset_timeline(g_settings.mission_id);
 
     while (1) {
+        if (s_pending_mission_switch) {
+            s_pending_mission_switch = false;
+            reset_timeline(s_pending_mission_id);
+        } else if (s_pending_sync_reset) {
+            s_pending_sync_reset = false;
+            reset_timeline(s_curr_mission);
+        }
+
         time_t now = sntp_time_get_epoch();
         struct tm tm_info;
         localtime_r(&now, &tm_info);
@@ -327,7 +340,7 @@ static void mission_engine_task(void *pvParameters)
                 memcpy(clean_text, ev.text, copy_len);
                 clean_text[copy_len] = '\0';
 
-                terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false);
+                terminal_ui_add_log(ev.get_sec, ev_local_sec, ev.speaker_id, clean_text, false, ev.is_continuation);
                 s_curr_event_idx++;
             }
 
@@ -339,11 +352,11 @@ static void mission_engine_task(void *pvParameters)
 
                 char comp_banner[128];
                 snprintf(comp_banner, sizeof(comp_banner), "--- MISSION COMPLETE: %s ---", comp_info->full_name);
-                terminal_ui_add_log(0, now, SPK_OTHER, comp_banner, false);
+                terminal_ui_add_log(0, now, SPK_OTHER, comp_banner, false, false);
 
                 char next_banner[128];
                 snprintf(next_banner, sizeof(next_banner), "--- 1-HR RECOVERY: NEXT %s ---", next_info->full_name);
-                terminal_ui_add_log(0, now + 1, SPK_OTHER, next_banner, false);
+                terminal_ui_add_log(0, now + 1, SPK_OTHER, next_banner, false, false);
 
                 s_mission_intermission = true;
                 s_intermission_end_sec = now + 3600; // 1-hour wait
@@ -360,5 +373,5 @@ void mission_engine_start(void)
 {
     if (s_engine_running) return;
     s_engine_running = true;
-    xTaskCreatePinnedToCore(mission_engine_task, "mission_engine", 4096, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(mission_engine_task, "mission_engine", 6144, NULL, 5, NULL, 1);
 }

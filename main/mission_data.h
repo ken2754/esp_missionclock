@@ -22,7 +22,8 @@ typedef struct {
     int32_t get_sec;        // Ground Elapsed Time in seconds (negative for pre-launch)
     uint8_t speaker_id;     // SPK_*
     uint8_t text_len;       // Length of message string
-    const char *text;       // Pointer to text in flash (non null-terminated or copied)
+    bool is_continuation;   // True if continuing same speaker across timestamps or wrapped chunks
+    const char *text;       // Pointer to cached text (valid until next mission_data_get_event call)
 } mission_event_t;
 
 typedef struct {

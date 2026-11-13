@@ -20,6 +20,7 @@ static const char *TAG = "terminal_ui";
 #define MAX_CHARS_PER_LINE  39              // 312px / 8px = 39 characters
 
 static SemaphoreHandle_t s_lvgl_mux = NULL;
+static SemaphoreHandle_t s_queue_mux = NULL;
 static lv_obj_t *s_scr = NULL;
 static lv_obj_t *s_log_labels[LOG_ROWS];
 static lv_obj_t *s_divider = NULL;
@@ -45,6 +46,8 @@ typedef struct {
 static type_chunk_t s_type_queue[TYPE_QUEUE_SIZE];
 static int s_type_q_head = 0;
 static int s_type_q_tail = 0;
+static bool s_last_added_valid = false;
+static uint8_t s_last_added_speaker_id = SPK_OTHER;
 
 // Active typing animation state
 static bool s_is_typing = false;
@@ -174,6 +177,9 @@ void terminal_ui_init(void)
     if (!s_lvgl_mux) {
         s_lvgl_mux = xSemaphoreCreateMutex();
     }
+    if (!s_queue_mux) {
+        s_queue_mux = xSemaphoreCreateMutex();
+    }
     if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
 
     s_scr = lv_scr_act();
@@ -244,13 +250,16 @@ static void enqueue_chunk(int32_t get_sec, int64_t local_sec, uint8_t speaker_id
     s_type_q_tail = next_tail;
 }
 
-void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke)
+void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke, bool is_continuation)
 {
     if (!text || strlen(text) == 0) return;
 
-    if (text[0] == '-') {
-        // System banner / silence warp: enqueue directly
+    if (s_queue_mux) xSemaphoreTake(s_queue_mux, portMAX_DELAY);
+
+    if (text[0] == '-' && speaker_id == SPK_OTHER) {
+        // System banner: enqueue directly and break continuation chain
         enqueue_chunk(get_sec, local_sec, speaker_id, text, is_joke, false);
+        s_last_added_valid = false;
     } else {
         // Line width capacity:
         // Main line: 9 chars timestamp + 1 space + 3 chars speaker + 1 space = 14 chars prefix
@@ -259,8 +268,9 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
         const int first_max = 24;
         const int cont_max  = 35;
 
+        bool start_as_cont = (!is_joke) && is_continuation && s_last_added_valid && (s_last_added_speaker_id == speaker_id);
         const char *p = text;
-        bool is_first = true;
+        bool is_first = !start_as_cont;
 
         while (*p) {
             while (*p == ' ') p++;
@@ -289,7 +299,17 @@ void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id,
                 is_first = false;
             }
         }
+
+        if (is_joke) {
+            // Jokes break mission speaker continuation so the next real line prints timestamp + speaker
+            s_last_added_valid = false;
+        } else {
+            s_last_added_valid = true;
+            s_last_added_speaker_id = speaker_id;
+        }
     }
+
+    if (s_queue_mux) xSemaphoreGive(s_queue_mux);
 }
 
 // Step typing animation with human cadence, block cursor, and 1s clock-sync blinking
@@ -309,11 +329,17 @@ static void update_typing_animation(int64_t now_ms)
     }
 
     if (!s_is_typing) {
+        bool has_item = false;
+        type_chunk_t item;
+        if (s_queue_mux) xSemaphoreTake(s_queue_mux, portMAX_DELAY);
         if (s_type_q_head != s_type_q_tail) {
-            // Dequeue next line
-            type_chunk_t item = s_type_queue[s_type_q_head];
+            item = s_type_queue[s_type_q_head];
             s_type_q_head = (s_type_q_head + 1) % TYPE_QUEUE_SIZE;
+            has_item = true;
+        }
+        if (s_queue_mux) xSemaphoreGive(s_queue_mux);
 
+        if (has_item) {
             // Push an empty row onto the screen buffer
             push_single_row_direct(item.get_sec, item.local_sec, item.speaker_id, "", item.is_joke, item.is_continuation);
             s_typing_row = s_entry_count - 1;
@@ -351,7 +377,7 @@ static void update_typing_animation(int64_t now_ms)
                 render_row_internal(s_typing_row, true);
 
                 // Queue catch-up speed boost: if queue has lines pending, speed up typing!
-                int pending = (s_type_q_tail - s_type_q_head + TYPE_QUEUE_SIZE) % TYPE_QUEUE_SIZE;
+                int pending = terminal_ui_get_queue_count();
                 int speed_factor = (pending > 2) ? 2 : 1;
 
                 // Human-like typing delay with natural hesitation
@@ -422,11 +448,15 @@ void terminal_ui_timer_handler(void)
 void terminal_ui_clear(void)
 {
     if (s_lvgl_mux) xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
+    if (s_queue_mux) xSemaphoreTake(s_queue_mux, portMAX_DELAY);
     s_entry_count = 0;
     s_type_q_head = 0;
     s_type_q_tail = 0;
+    s_last_added_valid = false;
+    s_last_added_speaker_id = SPK_OTHER;
     s_is_typing = false;
     s_typing_row = -1;
+    if (s_queue_mux) xSemaphoreGive(s_queue_mux);
     for (int i = 0; i < LOG_ROWS; i++) {
         if (s_log_labels[i]) lv_label_set_text_static(s_log_labels[i], "");
     }
@@ -435,10 +465,14 @@ void terminal_ui_clear(void)
 
 int terminal_ui_get_queue_count(void)
 {
-    return (s_type_q_tail - s_type_q_head + TYPE_QUEUE_SIZE) % TYPE_QUEUE_SIZE;
+    int count = 0;
+    if (s_queue_mux) xSemaphoreTake(s_queue_mux, portMAX_DELAY);
+    count = (s_type_q_tail - s_type_q_head + TYPE_QUEUE_SIZE) % TYPE_QUEUE_SIZE;
+    if (s_queue_mux) xSemaphoreGive(s_queue_mux);
+    return count;
 }
 
 bool terminal_ui_is_typing(void)
 {
-    return s_is_typing || (s_type_q_head != s_type_q_tail);
+    return s_is_typing || (terminal_ui_get_queue_count() > 0);
 }

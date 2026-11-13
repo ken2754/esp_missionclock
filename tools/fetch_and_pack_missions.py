@@ -10,6 +10,7 @@ import os
 import sys
 import re
 import struct
+import zlib
 import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,15 +29,23 @@ SPK_PAO   = 5  # Public Affairs Officer
 SPK_LCC   = 6  # Launch Control Center
 SPK_SC    = 7  # Spacecraft (Crew general)
 
+FLAG_CONTINUATION = 0x80
+EVENTS_PER_CHUNK = 256
+CONT_GAP_THRESHOLD_SEC = 45
+
 SPEAKER_MAP = {
     "CDR": SPK_CDR,
+    "SCDR": SPK_CDR,
     "CMP": SPK_CMP,
+    "CMP-CM": SPK_CMP,
     "LMP": SPK_LMP,
     "CC": SPK_CC,
     "CAPCOM": SPK_CC,
+    "ROOSA": SPK_CC,
     "PAO": SPK_PAO,
     "LCC": SPK_LCC,
     "SC": SPK_SC,
+    "CT": SPK_SC,
 }
 
 def clean_ascii(text):
@@ -103,7 +112,12 @@ def parse_apollo17_csv(raw_text):
         ts_raw = parts[1].strip()
         spk_raw = parts[2].strip().upper()
         msg_raw = parts[3].strip()
-        
+
+        # Handle rare shifted rows like "|000:51:00||CC|Okay..."
+        if not spk_raw and len(parts) >= 5 and parts[3].strip().upper() in SPEAKER_MAP:
+            spk_raw = parts[3].strip().upper()
+            msg_raw = parts[4].strip()
+
         if not ts_raw:
             continue
         
@@ -174,79 +188,69 @@ def split_sentences(text, max_len=140):
     return chunks
 
 def pack_mission_events(events):
-    # Sort events by get_sec
+    """
+    Pack ALL historical events into MISZ chunk-compressed format:
+      Header (16 bytes): magic="MISZ", total_events(u32), chunk_count(u32), events_per_chunk(u16), flags(u16=0)
+      Directory (chunk_count * 16 bytes): data_offset(u32), comp_size(u32), uncomp_size(u32), event_count(u16), reserved(u16)
+      Payloads: zlib-compressed chunks of <get_sec(i32), spk_and_flags(u8), text_len(u8), text[]>
+    """
+    # Stable sort preserves original ordering for identical timestamps
     events.sort(key=lambda x: x[0])
-    buf = bytearray()
-    buf.extend(b'MISS')
-    buf.extend(struct.pack('<I', 0))
-    
-    total_records = 0
+
+    records = []
+    prev_raw_sec = None
+    prev_raw_spk = None
+
     for get_sec, spk_id, text in events:
         chunks = split_sentences(text, max_len=140)
-        time_offset = 0
-        for chunk in chunks:
-            chunk_bytes = chunk.encode('ascii', errors='ignore')
-            if len(chunk_bytes) > 250:
-                chunk_bytes = chunk_bytes[:250]
-            # Advance time by 4 seconds for subsequent sentences of a long announcement
-            rec_sec = get_sec + time_offset
-            buf.extend(struct.pack('<iBB', rec_sec, spk_id, len(chunk_bytes)))
-            buf.extend(chunk_bytes)
-            total_records += 1
-            time_offset += 4
-            
-    struct.pack_into('<I', buf, 4, total_records)
+        same_spk_cont = (
+            prev_raw_spk == spk_id
+            and spk_id != SPK_OTHER
+            and prev_raw_sec is not None
+            and 0 <= (get_sec - prev_raw_sec) <= CONT_GAP_THRESHOLD_SEC
+        )
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_bytes = chunk.encode('ascii', errors='ignore')[:250]
+            if not chunk_bytes:
+                continue
+            is_cont = (chunk_idx > 0) or same_spk_cont
+            spk_flags = (spk_id & 0x7F) | (FLAG_CONTINUATION if is_cont else 0)
+            records.append((get_sec, spk_flags, chunk_bytes))
+        prev_raw_sec = get_sec
+        prev_raw_spk = spk_id
+
+    total_records = len(records)
+    chunk_count = (total_records + EVENTS_PER_CHUNK - 1) // EVENTS_PER_CHUNK
+
+    dir_offset = 16
+    payload_offset = dir_offset + chunk_count * 16
+
+    dir_entries = []
+    payloads = []
+    curr_offset = payload_offset
+
+    for c in range(chunk_count):
+        sub = records[c * EVENTS_PER_CHUNK : (c + 1) * EVENTS_PER_CHUNK]
+        raw_chunk = bytearray()
+        for rec_sec, spk_flags, chunk_bytes in sub:
+            raw_chunk.extend(struct.pack('<iBB', rec_sec, spk_flags, len(chunk_bytes)))
+            raw_chunk.extend(chunk_bytes)
+        comp = zlib.compress(bytes(raw_chunk), 9)
+        dir_entries.append((curr_offset, len(comp), len(raw_chunk), len(sub)))
+        payloads.append(comp)
+        curr_offset += len(comp)
+
+    buf = bytearray()
+    buf.extend(struct.pack('<4sIIHH', b'MISZ', total_records, chunk_count, EVENTS_PER_CHUNK, 0))
+    for off, csz, usz, cnt in dir_entries:
+        buf.extend(struct.pack('<IIIHH', off, csz, usz, cnt, 0))
+    for p in payloads:
+        buf.extend(p)
+
     return buf
 
-def filter_mission_events(m_id, events):
-    if m_id == "a17":
-        filtered = []
-        for e in events:
-            sec = e[0]
-            if sec < 0:
-                filtered.append(e)
-            elif sec <= 3600 * 10:
-                filtered.append(e)
-            elif 612000 <= sec <= 618000:
-                filtered.append(e)
-        return filtered
-    elif m_id == "a11":
-        filtered = []
-        for e in events:
-            sec = e[0]
-            if sec <= 3600 * 4:
-                filtered.append(e)
-            elif 3600 * 102 <= sec <= 3600 * 104:
-                filtered.append(e)
-            elif 3600 * 109 <= sec <= 3600 * 112:
-                filtered.append(e)
-        return filtered
-    elif m_id == "a13":
-        filtered = []
-        for e in events:
-            sec = e[0]
-            if sec <= 3600 * 3:
-                filtered.append(e)
-            elif 3600 * 55 <= sec <= 3600 * 60:
-                filtered.append(e)
-            elif 3600 * 140 <= sec <= 3600 * 143:
-                filtered.append(e)
-        return filtered
-    elif m_id == "a08":
-        filtered = []
-        for e in events:
-            sec = e[0]
-            if sec <= 3600 * 3:
-                filtered.append(e)
-            elif 3600 * 85 <= sec <= 3600 * 88:
-                filtered.append(e)
-            elif 3600 * 89 <= sec <= 3600 * 90:
-                filtered.append(e)
-        return filtered
-    return events
-
 def main():
-    print("=== Curating and Packing Apollo Mission Transcripts (Clean Boundary Split) ===")
+    print("=== Packing Complete Apollo Mission Transcripts (MISZ Chunked Zlib) ===")
     
     missions = [
         {"id": "a08", "name": "Apollo 8", "source_type": "spacelog", "url": "https://raw.githubusercontent.com/Spacelog/Spacelog/master/missions/a8/transcripts/TEC"},
@@ -274,17 +278,16 @@ def main():
         else:
             events = parse_apollo17_csv(raw_text)
             
-        curated = filter_mission_events(m["id"], events)
-        packed = pack_mission_events(curated)
+        packed = pack_mission_events(events)
         
         bin_path = os.path.join(DATA_DIR, f"mission_{m['id']}.bin")
         with open(bin_path, "wb") as f:
             f.write(packed)
             
-        print(f"[{m['name']}] Raw: {len(events)} -> Curated: {len(curated)} -> Packed: {len(packed)} bytes ({len(packed)/1024:.1f} KB)")
+        print(f"[{m['name']}] Raw: {len(events)} -> Packed: {len(packed)} bytes ({len(packed)/1024:.1f} KB)")
         total_packed_bytes += len(packed)
         
-    print(f"\nTotal curated binary size across all 4 missions: {total_packed_bytes} bytes ({total_packed_bytes/1024:.1f} KB)")
+    print(f"\nTotal full-mission binary size across all 4 missions: {total_packed_bytes} bytes ({total_packed_bytes/1024:.1f} KB)")
 
 if __name__ == "__main__":
     main()

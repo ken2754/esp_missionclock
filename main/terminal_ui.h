@@ -21,7 +21,7 @@ typedef struct {
 
 void terminal_ui_init(void);
 void terminal_ui_timer_handler(void);
-void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke);
+void terminal_ui_add_log(int32_t get_sec, int64_t local_sec, uint8_t speaker_id, const char *text, bool is_joke, bool is_continuation);
 void terminal_ui_refresh_all_lines(void);
 void terminal_ui_update_status(const char *clock_str, const char *mission_str, const char *mode_str, const char *wifi_str);
 void terminal_ui_clear(void);

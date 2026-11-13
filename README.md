@@ -32,7 +32,7 @@ Recreating historical NASA Apollo radio transcripts utterance-by-utterance in au
    - **Deep Pure Black Background** (`#000000`) paired with high-phosphor bright green (`#00ff41`) and glow dim green (`#00aa33` / `#007722`).
    - True 1bpp 8×16 monospace font extracted from the Linux kernel VGA font (crisp 1px stroke, zero blur).
    - **12-Line Terminal Grid**: 11 scrolling radio transcript rows + horizontal divider line + bottom status bar.
-   - Multi-line utterances cleanly wrap with a 2-space continuation indent (`  `).
+   - Multi-line utterances and consecutive same-speaker transmissions cleanly omit redundant timestamps/speaker tags and wrap with a 2-space continuation indent (`  `).
 
 3. **Typewriter Animation & 1-Second Clock Pulse Block Cursor**
    - Transcripts are typed out character-by-character with natural human keypress latency and punctuation hesitation.
@@ -45,7 +45,7 @@ Recreating historical NASA Apollo radio transcripts utterance-by-utterance in au
      - **`[GET]` (Historical GET Mode)**: Ground Elapsed Time relative to liftoff (e.g., `-02:26:14 PAO ...` / `+00:01:23 CDR ...`)
    - Uniform 9-character timestamp width with restored colons ensures speaker tags and messages never shift horizontally when toggling.
 
-5. **4 Curated Apollo Missions with 1-Hour Recovery Intermission Cycle**
+5. **4 Complete Apollo Missions with 1-Hour Recovery Intermission Cycle**
    - **Apollo 17 (The Main Star)**: Night launch, the famous T-30s sequencer hold and ~1h14m delay, manual tank pressurization, through to the final lunar EVA closing words.
    - **Apollo 11**: Lunar descent, 1202 alarms, Tranquility Base landing (*"The Eagle has landed"*), and first steps (*"That's one small step for man..."*).
    - **Apollo 13**: Launch, oxygen tank explosion crisis (*"Houston, we've had a problem"*), Aquarius lifeboat operations, and splashdown.
@@ -124,7 +124,7 @@ esp_missionclock/
 │   ├── term_font_8x16.c/.h     # Linux VGA 8x16 1bpp font with block cursor
 │   ├── terminal_ui.c/.h        # 12-line retro CRT terminal UI & typewriter animation
 │   ├── mission_engine.c/.h     # Historical timeline engine & 1-hr intermission
-│   ├── mission_data.c/.h       # Zero-copy embedded binary mission access
+│   ├── mission_data.c/.h       # On-demand zlib chunk decompression (MISZ format)
 │   ├── settings_mgr.c/.h       # NVS persistent configuration manager
 │   ├── display_driver.c/.h     # ST7789 / ILI9341 LCD driver
 │   ├── touch_driver.c/.h       # XPT2046 resistive touch driver
@@ -190,7 +190,7 @@ MIT License.
    - **完全漆黒背景**（`#000000`）に、高輝度リン光グリーン（`#00ff41`）とディムグリーン（`#00aa33` / `#007722`）のCRTデュアルカラー構成。
    - Linuxカーネル由来のTrue 1bpp 8×16 ドットモノスペースフォント（1pxストローク、にじみゼロ）。
    - **12行構成レイアウト**: スクロールする無線交信ログ 11行 ＋ 水平区切り線 ＋ 最下部ステータスバー 1行。
-   - 複数行にわたる長い発言は、2文字インデント（`  `）による美しい折り返し描画。
+   - 複数行にわたる長い発言や同一話者の連続発言時は、冗長なタイムスタンプと発言者タグを省略し、2文字インデント（`  `）で折り返し描画。
 
 3. **タイプライター演出 & 1秒点滅ブロックカーソル**
    - 新たな発言は、通信士や管制官がキーボードを叩いているかのような人間らしい揺らぎ（タイピング遅延・句読点での一息）を伴って1文字ずつタイピング表示。
@@ -203,7 +203,7 @@ MIT License.
      - **`[GET]`（史実モード）**: 打ち上げを基準とするGround Elapsed Time（例: `-02:26:14 PAO ...` / `+00:01:23 CDR ...`）
    - コロン付き9文字幅統一表記により、モードを切り替えても話者名や本文の横位置が一切左右にブレない設計。
 
-5. **全4ミッション対応 & 完了時の1時間インターミッション自動巡回**
+5. **全4ミッション完全収録 & 完了時の1時間インターミッション自動巡回**
    - **アポロ17号 (主役)**: T-30秒での自動停止と約1時間14分のカウントダウン保留、推進薬タンク加圧、そして夜間打ち上げの咆哮から月面最後のEVAまで。
    - **アポロ11号**: 月面降下、1202警報、静かの海への着陸（*"The Eagle has landed."*）、人類最初の一歩。
    - **アポロ13号**: 打ち上げ、酸素タンク爆発事故（*"Houston, we've had a problem."*）、月着陸船での生還。
@@ -282,7 +282,7 @@ esp_missionclock/
 │   ├── term_font_8x16.c/.h     # Linux VGA 8x16 1bpp フォント (ブロックカーソル含む)
 │   ├── terminal_ui.c/.h        # 12行レトロCRTターミナルUI & タイプライター演出
 │   ├── mission_engine.c/.h     # 史実タイムライン進行 & 1hインターミッション
-│   ├── mission_data.c/.h       # フラッシュ埋め込みミッションバイナリ直接参照
+│   ├── mission_data.c/.h       # ROM minizによるMISZ圧縮データのオンデマンド展開
 │   ├── settings_mgr.c/.h       # NVS設定管理
 │   ├── display_driver.c/.h     # ST7789 / ILI9341 LCDドライバ
 │   ├── touch_driver.c/.h       # XPT2046 タッチドライバ
